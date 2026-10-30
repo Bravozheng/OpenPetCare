@@ -7,10 +7,11 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import uuid
 
 
 SOURCE = Path(__file__).resolve().parents[1]
-FILES = ["SKILL.md", "scripts/opc.py", "docs/DATA_SCHEMA.md",
+FILES = ["SKILL.md", "agents/openai.yaml", "scripts/opc.py", "docs/DATA_SCHEMA.md",
          "docs/SCIENCE_SOURCES.md", "docs/SAFETY_POLICY.md"]
 
 
@@ -43,11 +44,15 @@ def install(target, replace=False):
         shutil.copytree(SOURCE / "openpetcare", staging / "openpetcare",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         if target.exists():
-            previous = target.with_name(".openpetcare-previous-" + next(tempfile._get_candidate_names()))
+            previous = target.with_name(".openpetcare-previous-" + uuid.uuid4().hex)
             os.replace(target, previous)
         os.replace(staging, target)
         if previous is not None:
-            shutil.rmtree(previous)
+            try:
+                shutil.rmtree(previous)
+            except OSError:
+                print("警告：新版本已安装，但旧版本临时目录未删除: " + str(previous),
+                      file=sys.stderr)
         return target
     except Exception:
         if previous is not None and previous.exists() and not target.exists():

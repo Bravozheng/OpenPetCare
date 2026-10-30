@@ -32,7 +32,7 @@ OpenPetCare 是一套 Agent Skill 加本地 Python 程序，不提供独立聊�
 
 ## 宿主安装路径
 
-根目录 `SKILL.md` 是可移植包的入口，`scripts/opc.py` 与核心 Python 模块随包一起保留。仅把文件放在仓库根目录并不能保证被宿主发现：Codex 本地扫描仓库 `.agents/skills/<name>/SKILL.md` 或用户 `~/.agents/skills/<name>/SKILL.md`；Claude Code 本地扫描项目 `.claude/skills/<name>/SKILL.md` 或用户 `~/.claude/skills/<name>/SKILL.md`。两者都支持技能目录的符号链接；当前安装脚本复制最小 Skill 包，真实数据目录仍与安装包分离。
+根目录 `SKILL.md` 是可移植包的入口，`agents/openai.yaml` 提供 Codex 展示名称、简介和默认调用提示，`scripts/opc.py` 与核心 Python 模块随包一起保留。仅把文件放在仓库根目录并不能保证被宿主发现：Codex 本地扫描仓库 `.agents/skills/<name>/SKILL.md` 或用户 `~/.agents/skills/<name>/SKILL.md`；Claude Code 本地扫描项目 `.claude/skills/<name>/SKILL.md` 或用户 `~/.claude/skills/<name>/SKILL.md`。两者都支持技能目录的符号链接；当前安装脚本复制最小 Skill 包，真实数据目录仍与安装包分离。
 
 Codex 的技能可被相关任务自动选中，也可显式用 `$openpetcare` 调用；Claude Code 可用 `/openpetcare`。命令是否可在具体宿主执行及跨会话留存，必须以实际运行验证为准。云端临时环境的技能发现和持久化不作为 v0.1 承诺。
 

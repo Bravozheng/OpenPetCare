@@ -1,0 +1,7 @@
+interface:
+  display_name: "OpenPetCare"
+  short_description: "建立犬只档案、生成每日照护建议并安全管理照护计划变更"
+  default_prompt: "使用 $openpetcare 为我的狗建立本地档案，并生成今天的照护建议。"
+
+policy:
+  allow_implicit_invocation: true

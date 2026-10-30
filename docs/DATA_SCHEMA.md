@@ -15,7 +15,7 @@
 }
 ```
 
-校验和用于发现意外损坏，不提供加密、真实性认证或访问控制。写入使用同目录临时文件、`fsync` 与原子替换；应用数据和备份可能包含健康及私人信息，应仅由用户控制，并避免提交到代码仓库。
+校验和用于发现意外损坏，不提供加密、真实性认证或访问控制。写入使用同目录临时文件、`fsync` 与原子替换；支持 `fchmod` 的平台把新文件权限设为 `0600`，Windows 等平台的访问控制依赖系统 ACL。应用数据和备份可能包含健康及私人信息，应仅由用户控制，并避免提交到代码仓库。
 
 ## `profile`：犬只当前资料
 
@@ -42,7 +42,7 @@
 ## 计划、提案与事件
 
 - `active_plan_id` 指向 `plans` 中当前有效版本的 UUID，尚未确认时为 `null`。
-- `plans[]` 含 `id`、`created_at`、`profile_revision`、`profile_snapshot`、`care_snapshot`、`confirmed_from_proposal_id`、`restored_from_plan_id`。确认或恢复都生成新版本，不覆盖旧版本。
+- `plans[]` 含 `id`、`created_at`、`status`、`profile_revision`、`profile_snapshot`、`care_snapshot`、`confirmed_from_proposal_id`、`restored_from_plan_id`。`status` 为 `complete` 或 `limited`；确认或恢复都生成新版本，不覆盖旧版本，并且必须且只能记录一种来源。
 - `proposals[]` 含 `id`、`created_at`、`base_revision`、`patch`、`candidate_profile`、`candidate_daily`、`changes`（字段前后差异）、`before_feeding`、`after_feeding`、`status`。状态为 `pending`、`confirmed` 或 `obsolete`；候选数据在确认前不改变当前档案和有效计划。
 - `events[]` 每项含 UTC `at`、`type`、`details`。事件覆盖建档、直接档案更新、提案、确认及恢复；事件详情和提案补丁都可能包含敏感资料。
 
@@ -52,4 +52,8 @@
 
 备份与导出采用同样的校验封装，其 `payload` 为 `{"archive_version":1,"created_at":UTC时间,"records":[...]}`。内置备份写入应用数据目录的 `backups/`；外部导出由用户指定路径。导入应先检查校验和、版本、全体档案结构与重复 ID；同 ID 冲突须显式允许替换。
 
-`schema_version` 和 `archive_version` 是迁移锚点。v0.1 首次定义版本 1，没有既存旧版数据可迁移；遇到未知未来版本必须保留原文件并拒绝静默降级。新增格式时应实现显式迁移、保留原备份并添加跨版本测试，不能靠直接改 JSON 字段。当前导入多犬备份若写入中途发生系统故障，可能需要从原备份重新恢复；该操作不等同数据库事务。
+`schema_version` 和 `archive_version` 是迁移锚点。v0.1 首次定义版本 1，没有既存旧版数据可迁移；遇到未知未来版本必须保留原文件并拒绝静默降级。新增格式时应实现显式迁移、保留原备份并添加跨版本测试，不能靠直接改 JSON 字段。
+
+导入在写入前验证整个归档及目标中的同 ID 档案；若进程内某条写入失败，会尽力恢复本次导入开始前的所有目标文件，自动测试覆盖多犬写入中途失败。该机制不是数据库事务：断电、进程被强制终止、文件系统故障或回滚本身失败时，仍可能需要从导入前备份恢复。因此使用 `--replace` 前仍必须先备份当前数据。
+
+v0.1 按单写入者运行：同一犬只不要同时从多个终端或 AI 宿主执行写命令。`profile_revision` 能拒绝按已过期版本进行的顺序写入，但当前没有跨进程文件锁，不能保证两个真正并发的写入都被检测。读取可并行；若后续需要多宿主同时写入，应先增加跨平台锁与并发测试。

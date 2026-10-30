@@ -1,19 +1,19 @@
 """Acceptance tests for a usable, persistent Skill v0.1 core."""
 
-from copy import deepcopy
 import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from openpetcare.care import daily
 from openpetcare.models import InputError, name_units, new_profile
 from openpetcare.service import (create_profile, update_profile, daily_care,
                                  propose_plan, confirm_plan, plan_history,
                                  restore_plan)
-from openpetcare.storage import Store, StorageError
+from openpetcare.storage import Store, StorageError, validate_record
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +89,16 @@ class ProfileAndCareTests(unittest.TestCase):
         self.assertEqual(result["feeding"]["status"], "insufficient_for_estimate")
         self.assertIsNone(result["feeding"]["food_g_per_day"])
 
+    def test_confirmed_vet_target_takes_priority_over_generic_formula(self):
+        data = complete_profile()
+        data["diet"]["vet_target_kcal_per_day"] = 800
+        data["diet"]["vet_target_reference"] = "兽医于 2026-10-20 确认"
+        result = daily(new_profile(data), "2026-10-30")
+        self.assertEqual(result["feeding"]["status"], "calculated_from_vet_target")
+        self.assertEqual(result["feeding"]["target_kcal_per_day"], 800)
+        self.assertEqual(result["feeding"]["food_g_per_day"], 220)
+        self.assertIn("兽医确认", result["feeding"]["basis"])
+
 
 class PersistenceAndPlanTests(unittest.TestCase):
     def setUp(self):
@@ -102,6 +112,8 @@ class PersistenceAndPlanTests(unittest.TestCase):
         proposal = propose_plan(self.store, self.dog, {"diet": {
             "food_name": "测试完整主粮 B", "kcal_per_kg": 4000,
             "calorie_source": "包装标注：4000 kcal/kg"}})
+        self.assertEqual(proposal["before_feeding"]["food_g_per_day"], before)
+        self.assertLess(proposal["after_feeding"]["food_g_per_day"], before)
         self.assertEqual(self.store.get(self.dog)["profile"]["diet"]["food_name"], "测试完整主粮 A")
         first = confirm_plan(self.store, self.dog, proposal["id"])["active_plan"]
         self.assertEqual(self.store.get(self.dog)["profile"]["diet"]["food_name"], "测试完整主粮 B")
@@ -120,6 +132,28 @@ class PersistenceAndPlanTests(unittest.TestCase):
         with self.assertRaises(InputError):
             restore_plan(self.store, self.dog, first["id"])
 
+    def test_confirmation_rederives_candidate_from_the_confirmed_patch(self):
+        proposal = propose_plan(self.store, self.dog, {"diet": {"food_name": "测试完整主粮 B"}})
+        record = self.store.get(self.dog)
+        record["proposals"][0]["candidate_profile"]["name"] = "未展示的名字"
+        self.store.save(record, expected_revision=record["profile_revision"])
+
+        with self.assertRaises(InputError):
+            confirm_plan(self.store, self.dog, proposal["id"])
+        self.assertEqual(self.store.get(self.dog)["profile"]["name"], "豆豆 🐕‍🦺")
+
+    def test_restore_reclassifies_plan_from_current_calculation(self):
+        proposal = propose_plan(self.store, self.dog, {})
+        source = confirm_plan(self.store, self.dog, proposal["id"])["active_plan"]
+        limited_care = daily(self.store.get(self.dog)["profile"], "2026-10-30")
+        limited_care["feeding"] = {"status": "review_needed", "food_g_per_day": None}
+
+        with mock.patch("openpetcare.service.calculate_daily", return_value=limited_care):
+            restored = restore_plan(self.store, self.dog, source["id"])
+        self.assertEqual(restored["active_plan"]["status"], "limited")
+        self.assertEqual(restored["active_plan"]["care_snapshot"]["feeding"]["status"],
+                         "review_needed")
+
     def test_backup_export_restore_and_corruption_detection(self):
         backup = self.store.backup()
         update_profile(self.store, self.dog, {"name": "新名字"})
@@ -132,6 +166,41 @@ class PersistenceAndPlanTests(unittest.TestCase):
         with self.assertRaises(StorageError):
             self.store.get(self.dog)
 
+    def test_record_validation_rejects_malformed_history(self):
+        record = self.store.get(self.dog)
+        record["events"].append({"unexpected": "shape"})
+        with self.assertRaises(StorageError):
+            validate_record(record)
+
+    def test_failed_multi_record_import_rolls_back_all_writes(self):
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as target_dir:
+            source = Store(source_dir)
+            first = create_profile(source, complete_profile())["profile"]["id"]
+            second_data = complete_profile()
+            second_data["name"] = "第二只测试犬"
+            second = create_profile(source, second_data)["profile"]["id"]
+            archive = source.export(Path(source_dir) / "export.json")
+
+            target = Store(target_dir)
+            target.import_archive(archive)
+            update_profile(target, first, {"name": "本地第一只"})
+            update_profile(target, second, {"name": "本地第二只"})
+            original_save = target.save
+            calls = 0
+
+            def fail_second_write(record, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated write failure")
+                return original_save(record, **kwargs)
+
+            with mock.patch.object(target, "save", side_effect=fail_second_write):
+                with self.assertRaises(StorageError):
+                    target.import_archive(archive, replace=True)
+            self.assertEqual(target.get(first)["profile"]["name"], "本地第一只")
+            self.assertEqual(target.get(second)["profile"]["name"], "本地第二只")
+
     def test_cli_new_process_reads_same_profile_and_plan(self):
         proposal = propose_plan(self.store, self.dog, {})
         plan_id = confirm_plan(self.store, self.dog, proposal["id"])["active_plan"]["id"]
@@ -142,6 +211,52 @@ class PersistenceAndPlanTests(unittest.TestCase):
         self.assertEqual(result["active_plan_id"], plan_id)
         self.assertEqual(result["plan_status"], "active")
         self.assertEqual(result["feeding"]["status"], "estimated_starting_point")
+
+
+class SkillPackageTests(unittest.TestCase):
+    def test_installed_bundle_runs_in_a_new_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            skill = base / "openpetcare"
+            data = base / "data"
+            subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "install.py"),
+                 "codex", "--target", str(skill)],
+                text=True, capture_output=True, check=True,
+            )
+            self.assertTrue((skill / "SKILL.md").is_file())
+            self.assertTrue((skill / "agents" / "openai.yaml").is_file())
+            self.assertTrue((skill / "docs" / "SCIENCE_SOURCES.md").is_file())
+            script = skill / "scripts" / "opc.py"
+
+            def command(*arguments):
+                result = subprocess.run(
+                    [sys.executable, str(script), "--data-dir", str(data), *arguments],
+                    text=True, capture_output=True, check=True,
+                )
+                return json.loads(result.stdout)
+
+            created = command("profile", "create", "--json",
+                              json.dumps(complete_profile(), ensure_ascii=False))
+            dog_id = created["profile"]["id"]
+            care = command("daily", "--dog", dog_id, "--date", "2026-10-30")
+            self.assertEqual(care["feeding"]["status"], "estimated_starting_point")
+
+            patch = {"diet": {"food_name": "安装测试主粮 B", "kcal_per_kg": 4000,
+                              "calorie_source": "包装标注：4000 kcal/kg"}}
+            proposal = command("plan", "propose", "--dog", dog_id, "--patch",
+                               json.dumps(patch, ensure_ascii=False))
+            self.assertEqual(proposal["status"], "pending")
+            self.assertEqual(command("profile", "get", "--dog", dog_id)["profile"]["diet"]["food_name"],
+                             "测试完整主粮 A")
+
+            confirmed = command("plan", "confirm", "--dog", dog_id,
+                                "--proposal", proposal["id"])
+            loaded = command("profile", "get", "--dog", dog_id)
+            history = command("plan", "history", "--dog", dog_id)
+            self.assertEqual(loaded["profile"]["diet"]["food_name"], "安装测试主粮 B")
+            self.assertEqual(loaded["active_plan_id"], confirmed["active_plan"]["id"])
+            self.assertEqual(history["active_plan_id"], confirmed["active_plan"]["id"])
 
 
 if __name__ == "__main__":

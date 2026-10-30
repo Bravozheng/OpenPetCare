@@ -93,7 +93,10 @@ def propose_plan(store, dog_id, patch):
         "status": "pending",
     }
     current = active_plan(record)
-    proposal["before_feeding"] = current["care_snapshot"].get("feeding") if current else None
+    proposal["before_feeding"] = (
+        current["care_snapshot"].get("feeding")
+        if current else calculate_daily(record["profile"]).get("feeding")
+    )
     proposal["after_feeding"] = care.get("feeding")
     record["proposals"].append(proposal)
     record["events"].append(_event("plan_proposed", {"proposal_id": proposal["id"]}))
@@ -110,9 +113,15 @@ def confirm_plan(store, dog_id, proposal_id):
         raise InputError("提案已经处理")
     if proposal["base_revision"] != record["profile_revision"]:
         raise InputError("提案基于旧档案；请重新生成")
+    candidate = merge_profile(record["profile"], proposal["patch"])
+    changes = _diff(record["profile"], candidate)
+    if candidate != proposal["candidate_profile"] or changes != proposal["changes"]:
+        raise InputError("提案内容与变更记录不一致；请重新生成")
+    fresh_care = calculate_daily(candidate)
+    if fresh_care != proposal["candidate_daily"] or fresh_care.get("feeding") != proposal["after_feeding"]:
+        raise InputError("提案的日期或照护计算已变化；请重新生成后再确认")
     old_revision = record["profile_revision"]
-    record["profile"] = deepcopy(proposal["candidate_profile"])
-    fresh_care = calculate_daily(record["profile"])
+    record["profile"] = candidate
     feeding_status = fresh_care["feeding"]["status"]
     if fresh_care["status"] == "urgent_review" or feeding_status == "invalid":
         raise InputError("提案含紧急健康风险或无效热量分配，不能确认为有效计划")
@@ -159,12 +168,16 @@ def restore_plan(store, dog_id, plan_id):
     old_revision = record["profile_revision"]
     record["profile"] = deepcopy(source["profile_snapshot"])
     record["profile_revision"] += 1
+    fresh_care = calculate_daily(record["profile"])
+    feeding_status = fresh_care["feeding"]["status"]
+    if fresh_care["status"] == "urgent_review" or feeding_status == "invalid":
+        raise InputError("历史版本在当前条件下含紧急健康风险或无效热量分配，不能恢复为有效计划")
     restored = {
         "id": str(uuid.uuid4()), "created_at": now_iso(),
-        "status": source.get("status", "limited"),
+        "status": "complete" if feeding_status in ("calculated_from_vet_target", "estimated_starting_point") else "limited",
         "profile_revision": record["profile_revision"],
         "profile_snapshot": deepcopy(record["profile"]),
-        "care_snapshot": calculate_daily(record["profile"]),
+        "care_snapshot": fresh_care,
         "confirmed_from_proposal_id": None,
         "restored_from_plan_id": plan_id,
     }

@@ -1,6 +1,5 @@
 """Checksummed, atomic, per-dog local storage and portable archives."""
 
-from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -60,7 +59,8 @@ def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temp_name = tempfile.mkstemp(prefix=".opc-", suffix=".tmp", dir=str(path.parent))
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2)
             stream.write("\n")
@@ -88,13 +88,121 @@ def _valid_id(dog_id):
     return normalized
 
 
+def _valid_timestamp(value, field):
+    if not isinstance(value, str):
+        raise StorageError(field + " 时间格式无效")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise StorageError(field + " 时间格式无效") from exc
+    if parsed.tzinfo is None:
+        raise StorageError(field + " 必须包含时区")
+
+
+def _exact_keys(value, expected, field):
+    if not isinstance(value, dict) or set(value) != set(expected):
+        raise StorageError(field + " 结构无效")
+
+
+def _validate_history(record):
+    dog_id = record["profile"]["id"]
+    plan_keys = {
+        "id", "created_at", "status", "profile_revision", "profile_snapshot",
+        "care_snapshot", "confirmed_from_proposal_id", "restored_from_plan_id",
+    }
+    proposal_keys = {
+        "id", "created_at", "base_revision", "patch", "candidate_profile",
+        "candidate_daily", "changes", "status", "before_feeding", "after_feeding",
+    }
+    plan_ids = []
+    for index, plan in enumerate(record["plans"]):
+        field = "plans[{}]".format(index)
+        _exact_keys(plan, plan_keys, field)
+        plan_ids.append(_valid_id(plan["id"]))
+        _valid_timestamp(plan["created_at"], field + ".created_at")
+        if plan["status"] not in ("complete", "limited"):
+            raise StorageError(field + " 状态无效")
+        if (isinstance(plan["profile_revision"], bool)
+                or not isinstance(plan["profile_revision"], int)
+                or not 1 <= plan["profile_revision"] <= record["profile_revision"]):
+            raise StorageError(field + " 档案版本无效")
+        try:
+            validate_profile(plan["profile_snapshot"])
+        except (InputError, KeyError, TypeError) as exc:
+            raise StorageError(field + " 档案快照无效: " + str(exc)) from exc
+        if plan["profile_snapshot"]["id"] != dog_id:
+            raise StorageError(field + " 犬只 ID 不一致")
+        if not isinstance(plan["care_snapshot"], dict) or plan["care_snapshot"].get("dog_id") != dog_id:
+            raise StorageError(field + " 照护快照无效")
+        for key in ("confirmed_from_proposal_id", "restored_from_plan_id"):
+            if plan[key] is not None:
+                _valid_id(plan[key])
+        if (plan["confirmed_from_proposal_id"] is None) == (plan["restored_from_plan_id"] is None):
+            raise StorageError(field + " 必须且只能记录一种版本来源")
+    if len(plan_ids) != len(set(plan_ids)):
+        raise StorageError("计划 ID 重复")
+
+    proposal_ids = []
+    for index, proposal in enumerate(record["proposals"]):
+        field = "proposals[{}]".format(index)
+        _exact_keys(proposal, proposal_keys, field)
+        proposal_ids.append(_valid_id(proposal["id"]))
+        _valid_timestamp(proposal["created_at"], field + ".created_at")
+        if proposal["status"] not in ("pending", "confirmed", "obsolete"):
+            raise StorageError(field + " 状态无效")
+        if (isinstance(proposal["base_revision"], bool)
+                or not isinstance(proposal["base_revision"], int)
+                or not 1 <= proposal["base_revision"] <= record["profile_revision"]):
+            raise StorageError(field + " 基础版本无效")
+        if not isinstance(proposal["patch"], dict):
+            raise StorageError(field + " 补丁无效")
+        try:
+            validate_profile(proposal["candidate_profile"])
+        except (InputError, KeyError, TypeError) as exc:
+            raise StorageError(field + " 候选档案无效: " + str(exc)) from exc
+        if proposal["candidate_profile"]["id"] != dog_id:
+            raise StorageError(field + " 犬只 ID 不一致")
+        if not isinstance(proposal["candidate_daily"], dict) or proposal["candidate_daily"].get("dog_id") != dog_id:
+            raise StorageError(field + " 候选照护方案无效")
+        if not isinstance(proposal["changes"], list):
+            raise StorageError(field + " 变更列表无效")
+        for change in proposal["changes"]:
+            _exact_keys(change, {"field", "before", "after"}, field + ".changes[]")
+            if not isinstance(change["field"], str) or not change["field"]:
+                raise StorageError(field + " 变更字段无效")
+        for key in ("before_feeding", "after_feeding"):
+            if proposal[key] is not None and not isinstance(proposal[key], dict):
+                raise StorageError(field + "." + key + " 无效")
+    if len(proposal_ids) != len(set(proposal_ids)):
+        raise StorageError("提案 ID 重复")
+
+    plan_id_set = set(plan_ids)
+    proposal_id_set = set(proposal_ids)
+    for plan in record["plans"]:
+        source_proposal = plan["confirmed_from_proposal_id"]
+        source_plan = plan["restored_from_plan_id"]
+        if source_proposal is not None and source_proposal not in proposal_id_set:
+            raise StorageError("计划引用的提案不存在")
+        if source_plan is not None and (source_plan not in plan_id_set or source_plan == plan["id"]):
+            raise StorageError("恢复来源计划不存在或引用自身")
+
+    for index, event in enumerate(record["events"]):
+        field = "events[{}]".format(index)
+        _exact_keys(event, {"at", "type", "details"}, field)
+        _valid_timestamp(event["at"], field + ".at")
+        if not isinstance(event["type"], str) or not event["type"] or not isinstance(event["details"], dict):
+            raise StorageError(field + " 内容无效")
+
+
 def validate_record(record):
     if not isinstance(record, dict) or record.get("schema_version") != SCHEMA_VERSION:
         raise StorageError("数据版本不兼容；保留原文件并使用兼容版本迁移")
     required = {"schema_version", "profile_revision", "profile", "active_plan_id", "plans", "proposals", "events"}
     if set(record) != required:
         raise StorageError("档案结构不完整")
-    if not isinstance(record["profile_revision"], int) or record["profile_revision"] < 1:
+    if (isinstance(record["profile_revision"], bool)
+            or not isinstance(record["profile_revision"], int)
+            or record["profile_revision"] < 1):
         raise StorageError("档案版本无效")
     if not all(isinstance(record[key], list) for key in ("plans", "proposals", "events")):
         raise StorageError("历史记录结构无效")
@@ -102,11 +210,14 @@ def validate_record(record):
         validate_profile(record["profile"])
     except (InputError, KeyError, TypeError) as exc:
         raise StorageError("档案内容无效: " + str(exc)) from exc
-    if record["active_plan_id"] is not None and not any(
-        isinstance(plan, dict) and plan.get("id") == record["active_plan_id"]
-        for plan in record["plans"]
-    ):
-        raise StorageError("当前计划版本不存在")
+    try:
+        _validate_history(record)
+        if record["active_plan_id"] is not None:
+            _valid_id(record["active_plan_id"])
+            if not any(plan["id"] == record["active_plan_id"] for plan in record["plans"]):
+                raise StorageError("当前计划版本不存在")
+    except InputError as exc:
+        raise StorageError("历史记录内容无效: " + str(exc)) from exc
 
 
 class Store:
@@ -167,8 +278,12 @@ class Store:
 
     def import_archive(self, path, replace=False):
         payload = unwrap(read_json(Path(path).expanduser()))
-        if not isinstance(payload, dict) or payload.get("archive_version") != 1 or not isinstance(payload.get("records"), list):
+        if (not isinstance(payload, dict)
+                or set(payload) != {"archive_version", "created_at", "records"}
+                or payload.get("archive_version") != 1
+                or not isinstance(payload.get("records"), list)):
             raise StorageError("备份格式不兼容")
+        _valid_timestamp(payload["created_at"], "created_at")
         records = payload["records"]
         ids = []
         for record in records:
@@ -179,7 +294,31 @@ class Store:
         collisions = [dog_id for dog_id in ids if self._path(dog_id).exists()]
         if collisions and not replace:
             raise StorageError("目标中已有同 ID 档案；恢复需显式指定 --replace")
-        # Validate the entire archive before writing any record.
-        for record in records:
-            self.save(record, create=not replace)
+        originals = {}
+        for dog_id in ids:
+            target = self._path(dog_id)
+            if target.exists():
+                self.get(dog_id)
+                originals[dog_id] = read_json(target)
+            else:
+                originals[dog_id] = None
+        try:
+            for record in records:
+                target = self._path(record["profile"]["id"])
+                self.save(record, create=not target.exists())
+        except Exception as exc:
+            rollback_errors = []
+            for dog_id, envelope in originals.items():
+                target = self._path(dog_id)
+                try:
+                    if envelope is None:
+                        if target.exists():
+                            target.unlink()
+                    else:
+                        atomic_json(target, envelope)
+                except OSError as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            if rollback_errors:
+                raise StorageError("导入失败且回滚不完整；请从导入前备份恢复") from exc
+            raise StorageError("导入失败，已恢复导入前数据") from exc
         return len(records)
