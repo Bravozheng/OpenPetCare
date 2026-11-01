@@ -37,6 +37,7 @@ ChatGPT 中的讨论**不会自动同步**到本仓库。只有项目负责人�
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：模块和运行边界。
 - [`docs/DATA_SCHEMA.md`](docs/DATA_SCHEMA.md)：持久化数据结构与迁移。
 - [`docs/SCIENCE_SOURCES.md`](docs/SCIENCE_SOURCES.md)：核验过的来源与适用条件。
+- [`docs/INTAKE_GUIDE.md`](docs/INTAKE_GUIDE.md)：中文 BCS 自评和狗粮官方资料补全流程。
 - [`docs/SAFETY_POLICY.md`](docs/SAFETY_POLICY.md)：医疗风险分流。
 - [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md)：自动测试和人工验收。
 - [`docs/ROADMAP.md`](docs/ROADMAP.md)：首发及后续计划。

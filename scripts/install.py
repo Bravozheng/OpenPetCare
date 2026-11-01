@@ -12,7 +12,7 @@ import uuid
 
 SOURCE = Path(__file__).resolve().parents[1]
 FILES = ["SKILL.md", "agents/openai.yaml", "scripts/opc.py", "docs/DATA_SCHEMA.md",
-         "docs/SCIENCE_SOURCES.md", "docs/SAFETY_POLICY.md"]
+         "docs/SCIENCE_SOURCES.md", "docs/SAFETY_POLICY.md", "docs/INTAKE_GUIDE.md"]
 
 
 def destination(host, scope, project):

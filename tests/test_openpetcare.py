@@ -61,6 +61,29 @@ class ProfileAndCareTests(unittest.TestCase):
         self.assertIn("diet.kcal_per_kg", result["feeding"]["missing"])
         self.assertIsNone(profile["medical"]["history"])
 
+    def test_missing_bcs_returns_chinese_self_assessment_action(self):
+        data = complete_profile()
+        data["bcs"] = {"score_9": None, "recorded_at": None}
+        feeding = daily(new_profile(data), "2026-10-30")["feeding"]
+        actions = {item["action"]: item["message"] for item in feeding["next_actions"]}
+
+        self.assertEqual(feeding["status"], "insufficient")
+        self.assertIn("guide_bcs_self_assessment", actions)
+        self.assertIn("摸肋骨", actions["guide_bcs_self_assessment"])
+        self.assertNotIn("diet.vet_target_kcal_per_day", feeding["missing"])
+        self.assertTrue(feeding["vet_target_optional"])
+
+    def test_missing_food_calories_requests_official_lookup_before_user_work(self):
+        data = complete_profile()
+        data["diet"]["kcal_per_kg"] = None
+        data["diet"]["calorie_source"] = None
+        feeding = daily(new_profile(data), "2026-10-30")["feeding"]
+        actions = {item["action"]: item["message"] for item in feeding["next_actions"]}
+
+        self.assertIn("lookup_exact_food_official_source", actions)
+        self.assertIn("制造商官方", actions["lookup_exact_food_official_source"])
+        self.assertIn("无法唯一匹配", actions["lookup_exact_food_official_source"])
+
     def test_contradiction_and_bad_name_are_rejected(self):
         with self.assertRaises(InputError):
             new_profile({"name": "小狗", "birth": {"date": "2023-01-01",
@@ -88,6 +111,23 @@ class ProfileAndCareTests(unittest.TestCase):
         result = daily(new_profile(data), "2026-10-30")
         self.assertEqual(result["feeding"]["status"], "insufficient_for_estimate")
         self.assertIsNone(result["feeding"]["food_g_per_day"])
+        actions = {item["action"]: item["message"]
+                   for item in result["feeding"]["next_actions"]}
+        self.assertIn("ask_known_health_conditions", actions)
+        self.assertIn("无需为此先去咨询兽医", actions["ask_known_health_conditions"])
+        self.assertFalse(any("vet_target" in item for item in result["feeding"]["missing"]))
+        self.assertTrue(result["feeding"]["vet_target_optional"])
+
+    def test_nonideal_bcs_gives_useful_next_step_not_vet_only_gate(self):
+        data = complete_profile()
+        data["bcs"]["score_9"] = 6
+        feeding = daily(new_profile(data), "2026-10-30")["feeding"]
+        actions = {item["action"]: item["message"] for item in feeding["next_actions"]}
+
+        self.assertEqual(feeding["status"], "insufficient_for_estimate")
+        self.assertIn("review_current_intake_and_weight_trend", actions)
+        self.assertIn("当前喂量", actions["review_current_intake_and_weight_trend"])
+        self.assertFalse(any("vet_target" in item for item in feeding["missing"]))
 
     def test_confirmed_vet_target_takes_priority_over_generic_formula(self):
         data = complete_profile()
@@ -227,6 +267,7 @@ class SkillPackageTests(unittest.TestCase):
             self.assertTrue((skill / "SKILL.md").is_file())
             self.assertTrue((skill / "agents" / "openai.yaml").is_file())
             self.assertTrue((skill / "docs" / "SCIENCE_SOURCES.md").is_file())
+            self.assertTrue((skill / "docs" / "INTAKE_GUIDE.md").is_file())
             script = skill / "scripts" / "opc.py"
 
             def command(*arguments):

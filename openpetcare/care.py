@@ -37,6 +37,72 @@ def _round_five(value):
     return int(math.floor(value / 5 + 0.5) * 5)
 
 
+def _next_actions(profile, missing=(), blockers=()):
+    """Return small, Chinese-first steps the host can actually carry out."""
+    missing = set(missing)
+    blockers = set(blockers)
+    actions = []
+
+    def add(action, message):
+        if not any(item["action"] == action for item in actions):
+            actions.append({"action": action, "message": message})
+
+    if "bcs.score_9" in missing:
+        add(
+            "guide_bcs_self_assessment",
+            "用中文解释 BCS 是 1–9 分体况评分，并引导主人依次摸肋骨、俯视腰身、侧看腹线；先选偏瘦、理想、偏胖或不确定，再展开对应分数，选定后记录当天日期。",
+        )
+    if "weight.kg" in missing or "weight.measured_at" in missing:
+        add("ask_recent_weight", "询问最近一次体重和称重日期；不知道日期时不要代填。")
+    if any(item.startswith("birth.") for item in missing):
+        add("ask_birth_or_estimated_age", "询问出生日期；不知道时改问估计年龄，并记录估计所对应的日期。")
+
+    diet = profile["diet"]
+    food_details_missing = bool(
+        {"diet.kcal_per_kg", "diet.calorie_source", "diet.life_stage_on_label"} & missing
+        or {"food_stage", "food_balance"} & blockers
+    )
+    if "diet.food_name" in missing:
+        add(
+            "ask_food_identity",
+            "只询问尚未提供的品牌、完整系列、口味或配方、干湿形态；出现多个地区版本时再问购买地区。",
+        )
+    elif diet["food_name"] and food_details_missing:
+        add(
+            "lookup_exact_food_official_source",
+            "先按品牌、完整产品线、口味或配方、形态和购买地区查制造商官方资料；只有无法唯一匹配时，才请主人抄包装上的“代谢能 / Calorie Content（热量）”一行。",
+        )
+    if "diet.meals_per_day" in missing or "diet.treat_kcal_per_day" in missing:
+        add("ask_feeding_routine", "询问当前每日餐次，以及零食是否有热量标注；未知零食热量不能当作 0。")
+
+    medical = profile["medical"]
+    if "health_unknown" in blockers or any(
+        medical[key] is None for key in ("history", "vet_restrictions", "red_flags")
+    ):
+        add(
+            "ask_known_health_conditions",
+            "直接询问主人目前是否有已知病史、活动或饮食限制、危险症状；若明确没有可记录为空列表，无需为此先去咨询兽医。",
+        )
+    if "known_health_condition" in blockers:
+        add(
+            "respect_known_health_constraints",
+            "已记录的病史或限制使通用健康成年犬公式不适用；先遵守已有方案，并继续提供不依赖新克数的分餐、观察和资料整理帮助。",
+        )
+    if "neutered" in blockers:
+        add("ask_neuter_status", "询问是否已绝育；这个事实会影响健康成年犬起始估算系数。")
+    if "age_range" in blockers:
+        add(
+            "use_current_intake_and_label_as_baseline",
+            "当前年龄不在 v0.1 通用成年犬估算范围；仍可核对适龄标签、当前喂量和体重变化，提供分餐与观察建议。已有专业目标时可录入，但它不是继续其他照护的门槛。",
+        )
+    if "bcs_range" in blockers:
+        add(
+            "review_current_intake_and_weight_trend",
+            "当前 BCS 不在 4–5/9，不直接套用健康成年犬维持公式；先记录当前喂量及近期体重、BCS 变化，避免未经复核大幅改量。",
+        )
+    return actions
+
+
 def _feeding(profile, stage):
     diet = profile["diet"]
     missing = []
@@ -53,7 +119,8 @@ def _feeding(profile, stage):
         missing.append("birth.date 或 birth.estimated_age_months + birth.estimated_as_of")
     if missing:
         return {"status": "insufficient", "missing": missing, "food_g_per_day": None,
-                "basis": None, "reported_current_food_g_per_day": diet["current_food_g_per_day"]}
+                "basis": None, "reported_current_food_g_per_day": diet["current_food_g_per_day"],
+                "next_actions": _next_actions(profile, missing), "vet_target_optional": True}
     target = diet["vet_target_kcal_per_day"]
     basis_kind = "vet_target"
     if target is None:
@@ -61,21 +128,33 @@ def _feeding(profile, stage):
         # Unknown health status is not treated as a healthy status.
         medical = profile["medical"]
         eligibility = []
+        blockers = []
         if stage != "adult_estimate_eligible_age":
-            eligibility.append("年龄不在通用成年犬起始估算范围（24–84 月）；请提供兽医确认的日热量目标")
+            eligibility.append("年龄不在通用成年犬起始估算范围（24–84 月）")
+            blockers.append("age_range")
         if profile["bcs"]["score_9"] not in (4, 5):
-            eligibility.append("BCS 不在 4–5/9；请由兽医评估热量目标")
+            eligibility.append("BCS 不在通用健康成年犬起始估算范围（4–5/9）")
+            blockers.append("bcs_range")
         if profile["neutered"] is None:
             eligibility.append("neutered")
-        if any(medical[key] != [] for key in ("history", "vet_restrictions", "red_flags")):
-            eligibility.append("medical.history、vet_restrictions、red_flags 须明确无问题；有病史或限制请用兽医目标")
+            blockers.append("neutered")
+        if any(medical[key] is None for key in ("history", "vet_restrictions", "red_flags")):
+            eligibility.append("已知病史、限制与危险症状尚未确认")
+            blockers.append("health_unknown")
+        elif any(medical[key] for key in ("history", "vet_restrictions", "red_flags")):
+            eligibility.append("已有病史、限制或危险症状，不适用通用健康成年犬公式")
+            blockers.append("known_health_condition")
         if diet["life_stage_on_label"] not in ("adult", "all_life_stages"):
             eligibility.append("主粮须标注适用于成年期")
+            blockers.append("food_stage")
         if diet["complete_and_balanced_on_label"] is not True:
             eligibility.append("diet.complete_and_balanced_on_label 须从包装或可靠资料确认")
+            blockers.append("food_balance")
         if eligibility:
-            return {"status": "insufficient_for_estimate", "missing": eligibility + ["diet.vet_target_kcal_per_day（可替代通用估算）"],
-                    "food_g_per_day": None, "reported_current_food_g_per_day": diet["current_food_g_per_day"]}
+            return {"status": "insufficient_for_estimate", "missing": eligibility,
+                    "food_g_per_day": None, "reported_current_food_g_per_day": diet["current_food_g_per_day"],
+                    "next_actions": _next_actions(profile, blockers=blockers),
+                    "vet_target_optional": True}
         rer = 70 * profile["weight"]["kg"] ** 0.75
         multiplier = 1.6 if profile["neutered"] else 1.8
         target = rer * multiplier
@@ -84,7 +163,7 @@ def _feeding(profile, stage):
     if treats >= target:
         return {"status": "invalid", "reason": "零食热量达到或超过总热量目标", "food_g_per_day": None}
     if treats > target * 0.1:
-        return {"status": "review_needed", "reason": "记录的零食热量超过总热量目标的 10%；先与兽医确认零食与主粮分配", "food_g_per_day": None}
+        return {"status": "review_needed", "reason": "记录的零食热量超过总热量目标的 10%；先核对零食与主粮分配，不直接套用计算克数", "food_g_per_day": None}
     if profile["medical"]["vet_restrictions"]:
         return {"status": "review_needed", "reason": "有兽医限制，需确认当前热量目标与食物仍适用", "food_g_per_day": None}
     if diet["complete_and_balanced_on_label"] is not True:
@@ -97,7 +176,7 @@ def _feeding(profile, stage):
         or stage == "senior_review" and label in ("adult", "senior")
     )
     if not suitable:
-        return {"status": "review_needed", "reason": "主粮包装生命阶段与当前年龄判断未能确认匹配；需兽医核对", "food_g_per_day": None}
+        return {"status": "review_needed", "reason": "主粮包装生命阶段与当前年龄判断未能确认匹配；先核对精确产品标签或制造商官方资料", "food_g_per_day": None}
     grams_exact = (target - treats) * 1000 / diet["kcal_per_kg"]
     grams = _round_five(grams_exact)
     if grams <= 0:
@@ -121,7 +200,7 @@ def _feeding(profile, stage):
         "weight_measured_at": profile["weight"]["measured_at"],
         "do_not_change_existing_ration_automatically": basis_kind == "adult_starting_estimate",
         "limitations": ["通用公式仅为起点，个体实际能量需求可与估算明显不同；随体重与 BCS 变化复核",
-                        "与当前喂量比较；若差异明显，先核对称重、热量和兽医意见，不直接大幅改变",
+                        "与当前喂量比较；若差异明显，先核对称重、热量和当前记录，不直接大幅改变",
                         "若体重记录已不能反映当前体况，先重新称重；若有疾病或兽医医嘱，以兽医要求为准"],
         "sources": [
             "https://www.merckvetmanual.com/multimedia/table/daily-maintenance-energy-requirements-for-dogs-and-cats",

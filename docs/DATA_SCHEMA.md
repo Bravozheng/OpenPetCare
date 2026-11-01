@@ -33,7 +33,9 @@
 | `prevention` | `vaccinations`、`parasite_prevention`、`confirmed_appointments` |
 | `constraints` | `caregiver_schedule`、`budget` |
 
-`birth.date` 与估计年龄二选一；估计年龄必须同时记录参考日期。标准犬种名必须附参考来源；无法核实时只填主人报告名。兽医热量目标必须带医嘱来源。`complete_and_balanced_on_label` 只记录包装或可靠资料是否明确标注完整均衡，不由品牌名推断；未知为 `null`。`life_stage_on_label` 使用 `growth`、`adult`、`all_life_stages`、`senior`。热量密度统一存为 kcal/kg，若包装使用 kcal/杯等单位，先取得可靠的克数换算，不能猜测。BCS 用 1–9 分制；档案更新采用字段补丁并递增 `profile_revision`。
+`birth.date` 与估计年龄二选一；估计年龄必须同时记录参考日期。标准犬种名必须附参考来源；无法核实时只填主人报告名。兽医热量目标是可选字段，只有用户已经提供时才记录，并且必须带医嘱来源。`complete_and_balanced_on_label` 只记录包装或可靠资料是否明确标注完整均衡，不由品牌名推断；未知为 `null`。`life_stage_on_label` 使用 `growth`、`adult`、`all_life_stages`、`senior`。
+
+热量密度统一存为 kcal/kg。`calorie_source` 应保存可复核的中文来源说明，包括精确产品名、市场或地区、原始值与单位、统一后的 kcal/kg、制造商官方 URL 和访问日期。若包装使用 kcal/杯或 kcal/罐，热量与克重必须来自同一精确产品的可靠资料，不能猜测。BCS 使用 1–9 分制；主人按中文引导自评时，把自评当天写入 `recorded_at`，不确定则两个字段保持 `null`，不能从“偏瘦 / 理想 / 偏胖”的粗分组强行映射整数。档案更新采用字段补丁并递增 `profile_revision`。
 
 通用健康成年犬热量起始估算要求：当日年龄 24–84 月（程序保守适用边界，并非权威生命阶段定义）、BCS 4–5/9、绝育状态已知、`medical.history`、`medical.vet_restrictions` 和 `medical.red_flags` 都是主人明确确认的 `[]`，主粮标签生命阶段为 `adult` 或 `all_life_stages`，`complete_and_balanced_on_label` 为 `true`，且体重、主粮名、包装热量及来源、餐次、零食 kcal 均已填写。若有兽医确认的目标，可用于其他年龄，但仍须满足其余必需输入与安全检查；危险信号出现时直接暂缓常规计算。
 
